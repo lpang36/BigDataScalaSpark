@@ -78,7 +78,9 @@ class StackOverflow extends Serializable {
 
   /** Group the questions and answers together */
   def groupedPostings(postings: RDD[Posting]): RDD[(Int, Iterable[(Posting, Posting)])] = {
-    ???
+    val qRDD = postings.filter(_.postingType==1).map(post => (post.id, post))
+	val aRDD = postings.filter(_.postingType==2).map(post => (post.parentId.getOrElse(0), post))
+	return qRDD.join(aRDD).groupByKey()
   }
 
 
@@ -97,7 +99,7 @@ class StackOverflow extends Serializable {
       highScore
     }
 
-    ???
+    return grouped.map(post => post._2).map(post => (post.toList(0)._1,post.toMap.map(vec => vec._2))).mapValues(_.toArray).mapValues(answerHighScore(_))
   }
 
 
@@ -117,7 +119,7 @@ class StackOverflow extends Serializable {
       }
     }
 
-    ???
+    return scored.map(post => (firstLangInTag(post._1.tags,langs).getOrElse(0)*langSpread,post._2))
   }
 
 
@@ -172,7 +174,7 @@ class StackOverflow extends Serializable {
 
   /** Main kmeans computation */
   @tailrec final def kmeans(means: Array[(Int, Int)], vectors: RDD[(Int, Int)], iter: Int = 1, debug: Boolean = false): Array[(Int, Int)] = {
-    val newMeans = means.clone() // you need to compute newMeans
+    val newMeans = vectors.map(vec => (findClosest(vec,means),vec)).groupByKey().mapValues(averageVectors(_)).map(vec=>vec._2).collect()
 
     // TODO: Fill in the newMeans array
     val distance = euclideanDistance(means, newMeans)
