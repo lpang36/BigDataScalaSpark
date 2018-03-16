@@ -63,8 +63,8 @@ object TimeUsage {
     * @param columnNames Column names of the DataFrame
     */
   def dfSchema(columnNames: List[String]): StructType = {
-	  val args = Seq(StructField(columnNames(0),StringType,false))
-	  columnNames.drop(0).foreach{ args++(StructField(_,DoubleType,false)) }
+	  var args = Seq(StructField(columnNames(0),StringType,false))
+	  columnNames.drop(0).foreach{ col => args = args:+(StructField(col,DoubleType,false)) }
 	  return StructType(args)
   }
 
@@ -74,7 +74,7 @@ object TimeUsage {
     */
   def row(line: List[String]): Row = {
 	  val args = Seq(line(0))
-	  line.drop(0).foreach { args++_.toDouble }
+	  line.drop(0).foreach { args+_ }
 	  return Row.fromSeq(args)
   }
 
@@ -94,26 +94,28 @@ object TimeUsage {
     *    "t10", "t12", "t13", "t14", "t15", "t16"and "t18"(those which are not part of the previous groups only).
     */
   def classifiedColumns(columnNames: List[String], df: DataFrame): (List[Column], List[Column], List[Column]) = {
-	val needs = List()
-	val work = List()
-	val other = List()
-	val needsList = ("t01", "t03", "t11", "t1801", "t1803")
-	val workList = ("t05", "t1805")
-	val otherList = ("t02", "t04", "t06", "t07", "t08", "t09", "t10", "t12", "t13", "t14", "t15", "t16", "t18")
+	var needs = List[Column]()
+	var work = List[Column]()
+	var other = List[Column]()
+	val needsList = List("t01", "t03", "t11", "t1801", "t1803")
+	val workList = List("t05", "t1805")
+	val otherList = List("t02", "t04", "t06", "t07", "t08", "t09", "t10", "t12", "t13", "t14", "t15", "t16", "t18")
 	def startsWith(word: String, prefix: List[String]): Boolean = {
 		prefix.foreach {
-			if (word takeLeft _.length()!=_)
+      item =>
+			if (word.substring(0,item.length())!=item)
 				return false
 		}
 		return true
 	}		
-    columnNames.foreach{
-		if (startsWith(_, needsList))
-			needs+=df(_)
-		if (startsWith(_, workList))
-			work+=df(_)
-		if (startsWith(_, otherList))
-			other+=df(_)
+  columnNames.foreach{
+    column =>
+		if (startsWith(column, needsList))
+			needs = needs:+df(column)
+		if (startsWith(column, workList))
+			work = work:+df(column)
+		if (startsWith(column, otherList))
+			other = other:+df(column)
 	}
 	return (needs,work,other)
   }
@@ -154,13 +156,13 @@ object TimeUsage {
     otherColumns: List[Column],
     df: DataFrame
   ): DataFrame = {
-    val workingStatusProjection: Column = df.select("telfs").map(_ match { case _>=1 && _<3 => "working" case _ => "not working" })
-    val sexProjection: Column = df.select("tesex").map(_ match { case 1 => "male" case _ => "female" })
-    val ageProjection: Column = df.select("teage").map(_ match { case _>=15 && _<=22 => "young" case _>=23 && _<55 => "active" case _ => "elder" })
-
-    val primaryNeedsProjection: Column = df.select(primaryNeedsColumns: _*).foreach(_.toSeq().aggregate(_+_))
-    val workProjection: Column = df.select(workColumns: _*).foreach(_.toSeq().aggregate(_+_))
-    val otherProjection: Column = df.select(otherColumns: _*).foreach(_.toSeq().aggregate(_+_))
+    val workingStatusProjection: Column = df.select("telfs").rdd.map(row => row(0).asInstanceOf[Double]).map(item => item match { case _ if (item>=1 && item<3) => "working" case _ => "not working" }).toDF()("telfs")
+    val sexProjection: Column = df.select("tesex").rdd.map(row => row(0).asInstanceOf[Double]).map((item: Double) => item match { case 1 => "male" case _ => "female" }).toDF()("tesex")
+    val ageProjection: Column = df.select("teage").rdd.map(row => row(0).asInstanceOf[Double]).map((item: Double) => item match { case _ if (item>=15 && item<=22) => "young" case _ if (item>=23 && item<55) => "active" case _ => "elder" }).toDF()("teage")
+    
+    val primaryNeedsProjection: Column = primaryNeedsColumns.reduce(_+_)/60
+    val workProjection: Column = workColumns.reduce(_+_)/60
+    val otherProjection: Column = otherColumns.reduce(_+_)/60
     df
       .select(workingStatusProjection, sexProjection, ageProjection, primaryNeedsProjection, workProjection, otherProjection)
       .where($"telfs" <= 4) // Discard people who are not in labor force
@@ -184,12 +186,9 @@ object TimeUsage {
     * Finally, the resulting DataFrame should be sorted by working status, sex and age.
     */
   def timeUsageGrouped(summed: DataFrame): DataFrame = {
-	summed = summed.groupBy("workingStatusProjection").groupBy("sexProjection").groupBy("ageProjection")
-	val primaryNeeds = summed.agg(round(avg("primaryNeedsProjection")))
-	val work = summed.agg(round(avg("workProjection")))
-	val other = summed.agg(round(avg("otherProjection")))
-	val names = Seq("working","sex","age","primaryNeeds","work","other")
-	summed.select("workingStatusProjection","sexProjection","ageProjection",primaryNeeds,work,other).orderBy(working,sex,age).toDF(names: _*)
+    var temp = summed.groupBy("workingStatusProjection","sexProjection","ageProjection").agg(round(avg("primaryNeedsProjection")),round(avg("workProjection")),round(avg("otherProjection")))
+    val names = Seq("working","sex","age","primaryNeeds","work","other")
+    temp.select("workingStatusProjection","sexProjection","ageProjection","primaryNeedsProjection","workProjection","otherProjection").orderBy("working","sex","age").toDF(names: _*)
   }
 
   /**
@@ -231,18 +230,17 @@ object TimeUsage {
     */
   def timeUsageGroupedTyped(summed: Dataset[TimeUsageRow]): Dataset[TimeUsageRow] = {
     import org.apache.spark.sql.expressions.scalalang.typed
-    def round1(d:Double) = (d * 10).round / 10d
 	summed
       .groupByKey(row => (row.working, row.sex, row.age))
-      .agg(
-        avg(_.primaryNeeds),
-        avg(_.work),
-        avg(_.other)
+      .agg( 
+        round(avg($"primaryNeeds")).as[Double],
+        round(avg($"work")).as[Double],
+        round(avg($"other")).as[Double]
       ).map {
-      case ((working, sex, age), primaryNeeds, work, other) => TimeUsageRow(working, sex, age,  round1(primaryNeeds), round1(work), round1(other))
+      case ((working, sex, age), primaryNeeds, work, other) => TimeUsageRow(working.asInstanceOf[String], sex.asInstanceOf[String], age.asInstanceOf[String], primaryNeeds.asInstanceOf[Double], work.asInstanceOf[Double], other.asInstanceOf[Double])
     }.orderBy('working, 'sex, 'age)
   }
-}
+                                                                            }
 
 /**
   * Models a row of the summarized data set
